@@ -48,12 +48,17 @@ class KnownMapLocalizer:
     """Coarse-to-fine correlative matcher with strict global verification."""
 
     def __init__(self, data: np.ndarray, resolution: float, radius: float,
-                 config: KnownMapLocalizerConfig | None = None) -> None:
+                 config: KnownMapLocalizerConfig | None = None, *, origin_x=None, origin_y=None, origin_yaw=0.0) -> None:
         self.data = np.asarray(data, dtype=np.int8)
         if self.data.ndim != 2 or self.data.size == 0:
             raise ValueError("known map must be a non-empty 2-D grid")
         self.resolution = float(resolution)
         self.radius = float(radius)
+        self.origin_x=float(-self.radius if origin_x is None else origin_x)
+        self.origin_y=float(-self.radius if origin_y is None else origin_y)
+        self.origin_yaw=float(origin_yaw)
+        if not all(math.isfinite(v) for v in (self.origin_x,self.origin_y,self.origin_yaw)):
+            raise ValueError('known map origin must be finite')
         self.config = config or KnownMapLocalizerConfig()
         self.last_status = "waiting_for_global_localization"
         self.last_error_m: float | None = None
@@ -104,8 +109,10 @@ class KnownMapLocalizer:
         return np.sqrt(squared) * self.resolution
 
     def _cell(self, x: float, y: float) -> tuple[int, int] | None:
-        gx = int(math.floor((x + self.radius) / self.resolution))
-        gy = int(math.floor((y + self.radius) / self.resolution))
+        dx,dy=x-self.origin_x,y-self.origin_y
+        c,s=math.cos(self.origin_yaw),math.sin(self.origin_yaw)
+        gx = int(math.floor((c*dx+s*dy) / self.resolution))
+        gy = int(math.floor((-s*dx+c*dy) / self.resolution))
         if 0 <= gy < self.data.shape[0] and 0 <= gx < self.data.shape[1]:
             return gx, gy
         return None
@@ -125,8 +132,10 @@ class KnownMapLocalizer:
                                 y + s * points[:, 0] + c * points[:, 1]))
 
     def _endpoint_distances(self, world: np.ndarray) -> np.ndarray:
-        gx = np.floor((world[:, 0] + self.radius) / self.resolution).astype(int)
-        gy = np.floor((world[:, 1] + self.radius) / self.resolution).astype(int)
+        dx,dy=world[:,0]-self.origin_x,world[:,1]-self.origin_y
+        c,s=math.cos(self.origin_yaw),math.sin(self.origin_yaw)
+        gx = np.floor((c*dx+s*dy) / self.resolution).astype(int)
+        gy = np.floor((-s*dx+c*dy) / self.resolution).astype(int)
         valid = ((gx >= 0) & (gx < self.data.shape[1]) &
                  (gy >= 0) & (gy < self.data.shape[0]))
         distances = np.full(len(world), max(self.radius, 1.0), dtype=float)
@@ -187,25 +196,30 @@ class KnownMapLocalizer:
         return np.arange(start, stop + step * 0.5, step, dtype=float)
 
     def _coarse_candidates(self, points: np.ndarray) -> list[tuple[float, tuple[float, float, float]]]:
-        xy = self._grid_values(-self.radius, self.radius, self.config.global_xy_step_m)
+        lx = self._grid_values(0., self.data.shape[1]*self.resolution, self.config.global_xy_step_m)
+        ly = self._grid_values(0., self.data.shape[0]*self.resolution, self.config.global_xy_step_m)
         yaws = self._grid_values(-math.pi, math.pi, self.config.global_yaw_step_rad)
+        c_map,s_map=math.cos(self.origin_yaw),math.sin(self.origin_yaw)
         candidates: list[tuple[float, tuple[float, float, float]]] = []
         for yaw in yaws:
             c, s = math.cos(float(yaw)), math.sin(float(yaw))
             relative = np.column_stack((c * points[:, 0] - s * points[:, 1],
                                         s * points[:, 0] + c * points[:, 1]))
-            for x in xy:
-                world_x = relative[:, 0, None] + x
-                world_y = relative[:, 1, None] + xy[None, :]
-                gx = np.floor((world_x + self.radius) / self.resolution).astype(int)
-                gy = np.floor((world_y + self.radius) / self.resolution).astype(int)
+            for local_x in lx:
+                world_x = relative[:, 0, None] + self.origin_x+c_map*local_x-s_map*ly[None,:]
+                world_y = relative[:, 1, None] + self.origin_y+s_map*local_x+c_map*ly[None,:]
+                dx,dy=world_x-self.origin_x,world_y-self.origin_y
+                gx = np.floor((c_map*dx+s_map*dy) / self.resolution).astype(int)
+                gy = np.floor((-s_map*dx+c_map*dy) / self.resolution).astype(int)
                 valid = ((gx >= 0) & (gx < self.data.shape[1]) &
                          (gy >= 0) & (gy < self.data.shape[0]))
                 safe_gx = np.clip(gx, 0, self.data.shape[1] - 1)
                 safe_gy = np.clip(gy, 0, self.data.shape[0] - 1)
                 scores = np.mean(self._matching_mask[safe_gy, safe_gx] & valid, axis=0)
                 for index in np.argsort(scores)[-min(3, len(scores)):]:
-                    candidates.append((float(scores[index]), (float(x), float(xy[index]), float(yaw))))
+                    x=self.origin_x+c_map*local_x-s_map*ly[index]
+                    y=self.origin_y+s_map*local_x+c_map*ly[index]
+                    candidates.append((float(scores[index]), (float(x), float(y), float(yaw))))
         candidates.sort(key=lambda item: item[0], reverse=True)
         unique: list[tuple[float, tuple[float, float, float]]] = []
         for score, pose in candidates:

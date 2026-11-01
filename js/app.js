@@ -26,6 +26,11 @@ let activeMapId = null;
 let batteryPendingRequest = null;
 let batteryPendingTimer = null;
 let features = null;
+let transportOpen = false, bridgeHealthy = false, telemetryFresh = false;
+let mapAvailable = false, mapSignature = '';
+let poseSourceStamp = null, scanSourceStamp = null, bridgeSourceStamp = null;
+let mapSourceStamp = null, poseProgressAt = 0, scanProgressAt = 0, bridgeProgressAt = 0, mapProgressAt = 0;
+const TELEMETRY_STALE_MS = 1500;
 const drivePointers = new Map();
 const driveKeys = new Map();
 
@@ -41,6 +46,10 @@ function sendDrive() {
   const w = (held.left - held.right) * MAX_ANGULAR;
   if (pendingOperation && (v || w)) {
     UIController.updateDrive(held, false, "Wait for the map or reset confirmation before moving.");
+    return false;
+  }
+  if ((v || w) && !telemetryFresh) {
+    UIController.updateDrive(held, false, "Robot telemetry is stale; movement is blocked.");
     return false;
   }
   const sent = WebSocketManager.send({ type: "drive", v, omega: w });
@@ -63,6 +72,11 @@ function releaseDrive() {
 }
 
 function sendCommand(message, successText) {
+  if (['nav_goal','nav_explore','delivery_start','delivery_return'].includes(message?.type)
+      && (!telemetryFresh || (message.type==='nav_goal' && (!mapAvailable || Date.now()-mapProgressAt>TELEMETRY_STALE_MS)))) {
+    UIController.log("Fresh robot telemetry and map data are required for this navigation command.");
+    return false;
+  }
   if (!WebSocketManager.send(message)) {
     UIController.log("Commande non envoyée : reconnectez le robot, puis réessayez.");
     return false;
@@ -107,7 +121,7 @@ function finishOperation(result) {
     UIController.log($("operationStatus").textContent);
     return;
   }
-  if (["clear_map", "reset_odom", "nav_clear_map", "configure_map"].includes(type)) {
+  if (["clear_map", "reset_odom", "nav_clear_map"].includes(type)) {
     MapModel.clear();
     ThreeDRenderer.clearPoints();
     pendingKnownMap = null;
@@ -147,6 +161,14 @@ function showView(mode) {
 function sendNavigationGoal(x, y, angleInput = $("goalYaw"), withoutAngle = false) {
   if (batteryPendingRequest) { UIController.log("Attendez que la nouvelle charge soit appliquée avant de lancer le trajet."); return false; }
   if (pendingOperation) { UIController.log("Wait for the map operation to finish before navigating."); return false; }
+  if (!telemetryFresh || !mapAvailable || Date.now()-mapProgressAt>TELEMETRY_STALE_MS) {
+    UIController.log("Fresh robot telemetry and map data are required before sending a goal.");
+    return false;
+  }
+  const cell=MapModel.worldToCell(x,y);
+  if(!cell) { UIController.log("Goal is outside the current map bounds."); return false; }
+  if(cell.value===100) { UIController.log("Goal lies in an occupied cell; choose another location."); return false; }
+  if(cell.value<0 && !window.confirm("This goal is in unknown map space. Continue?")) return false;
   const angle = withoutAngle ? "" : angleInput.value.trim();
   if (!withoutAngle && (!angleInput.validity.valid || (angle !== "" && !Number.isFinite(Number(angle))))) {
     UIController.log("Enter a finite final orientation in degrees, or leave it blank");
@@ -166,8 +188,13 @@ function sendNavigationGoal(x, y, angleInput = $("goalYaw"), withoutAngle = fals
 }
 
 function requestMapGoal(x, y) {
+  if (!telemetryFresh || !mapAvailable || Date.now()-mapProgressAt>TELEMETRY_STALE_MS) { UIController.log("A fresh robot and map snapshot are required before selecting a goal."); return; }
   if (features?.pick(x,y)) return;
   if (pendingOperation) return;
+  const cell=MapModel.worldToCell(x,y);
+  if(!cell) { UIController.log("Goal is outside the current map bounds."); return; }
+  if(cell.value===100) { UIController.log("Goal lies in an occupied cell; choose another location."); return; }
+  if(cell.value<0 && !window.confirm("This goal is in unknown map space. Continue?")) return;
   releaseDrive();
   pendingGoal = { x, y };
   $("goalX").value = x.toFixed(2);
@@ -193,6 +220,7 @@ function processMessage(message) {
     return;
   }
   if (!message || message.type !== "scan") return;
+  updateFreshness(message);
   finishOperation(message.operation);
   UIController.updateSafety(message.safety);
   if (batteryPendingRequest && message.battery?.request_id === batteryPendingRequest) {
@@ -310,6 +338,13 @@ function processMessage(message) {
     : [];
   if (message.map?.data_b64) {
     try {
+      const geometry={width:Number(message.map.width),height:Number(message.map.height),
+        origin_x:Number(message.map.origin_x ?? -message.map.radius),origin_y:Number(message.map.origin_y ?? -message.map.radius),
+        origin_yaw:Number(message.map.origin_yaw ?? 0),frame_id:message.map.frame_id ?? 'map'};
+      const signature=[message.map.map_id,message.map.revision,geometry.width,geometry.height,
+        message.map.resolution,geometry.origin_x,geometry.origin_y,geometry.origin_yaw,geometry.frame_id,message.map.data_b64].join('|');
+      mapAvailable=true;
+      if(signature!==mapSignature) {
       if (message.map.map_id && message.map.map_id !== activeMapId) {
         ThreeDRenderer.clearPoints();
         activeMapId = message.map.map_id;
@@ -318,13 +353,16 @@ function processMessage(message) {
       const raw = atob(message.map.data_b64);
       const bytes = new Uint8Array(raw.length);
       for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-      MapModel.loadGrid(Number(message.map.resolution), Number(message.map.radius), Array.from(new Int8Array(bytes.buffer)));
+      MapModel.loadGrid(Number(message.map.resolution), Number(message.map.radius), Array.from(new Int8Array(bytes.buffer)), geometry);
       ThreeDRenderer.setStaticMap(MapModel.get());
+      mapSignature=signature;
       $("resolution").value = message.map.resolution;
       $("resVal").textContent = Number(message.map.resolution).toFixed(2) + " m";
+      syncMapRadiusLimit();
       $("radius").value = message.map.radius;
       $("radiusVal").textContent = message.map.radius + " m";
       knownMapLoaded = true;
+      }
     } catch (error) { UIController.log(`[MAP] decode error: ${error}`); }
   }
   if (!message.map && points.length) ThreeDRenderer.addPoints(points);
@@ -334,6 +372,43 @@ function processMessage(message) {
   ThreeDRenderer.setLivePoints(message.live_points ?? points);
   UIController.updateCounters({ occupied: map.occupiedCount });
   GridRenderer.render(map, RobotState.get(), message.live_points ?? points, "#53d8ff", [], "#ff4fd8");
+}
+
+function syncMapRadiusLimit() {
+  const resolution=Number($("resolution").value);
+  const slider=$("radius");
+  if(!Number.isFinite(resolution)||resolution<=0||!slider)return;
+  const minimum=Number(slider.min)||5;
+  const maximum=Math.max(minimum,Math.floor(500*resolution+1e-9));
+  slider.max=String(maximum);
+  if(Number(slider.value)>maximum)slider.value=String(maximum);
+  $("radiusVal").textContent=Number(slider.value)+" m";
+}
+
+function updateFreshness(message) {
+  const now=Date.now(), stamps=message.source_stamps_ns||{};
+  const validPose=message.robot && ['x','y','theta'].every(key=>Number.isFinite(Number(message.robot[key])));
+  if(validPose && stamps.pose && stamps.pose!==poseSourceStamp) { poseSourceStamp=stamps.pose;poseProgressAt=now; }
+  if(message.scanning===true && stamps.scan && stamps.scan!==scanSourceStamp) { scanSourceStamp=stamps.scan;scanProgressAt=now; }
+  if(stamps.map && stamps.map!==mapSourceStamp) { mapSourceStamp=stamps.map;mapProgressAt=now; }
+  const bridge=message.bridge||{};
+  if(bridge.sensor_stamp_ns && String(bridge.sensor_stamp_ns)!==bridgeSourceStamp) {
+    bridgeSourceStamp=String(bridge.sensor_stamp_ns);bridgeProgressAt=now;
+  }
+  bridgeHealthy=bridge.connected===true && bridgeProgressAt>0 && now-bridgeProgressAt<=TELEMETRY_STALE_MS;
+  telemetryFresh=!!validPose && poseProgressAt>0 && scanProgressAt>0
+    && now-poseProgressAt<=TELEMETRY_STALE_MS && now-scanProgressAt<=TELEMETRY_STALE_MS && bridgeHealthy;
+  UIController.setBridge(bridgeHealthy);
+  UIController.setTelemetry(telemetryFresh?'fresh':(poseProgressAt||scanProgressAt?'stale':'waiting'),telemetryFresh);
+}
+
+function refreshFreshness() {
+  const now=Date.now();
+  bridgeHealthy=bridgeSourceStamp!==null && bridgeProgressAt>0 && now-bridgeProgressAt<=TELEMETRY_STALE_MS;
+  telemetryFresh=bridgeHealthy && poseProgressAt>0 && scanProgressAt>0
+    && now-poseProgressAt<=TELEMETRY_STALE_MS && now-scanProgressAt<=TELEMETRY_STALE_MS;
+  UIController.setBridge(bridgeHealthy);
+  UIController.setTelemetry(telemetryFresh?'fresh':(poseProgressAt||scanProgressAt?'stale':'waiting'),telemetryFresh);
 }
 
 function installDriveControls() {
@@ -496,13 +571,12 @@ function installUI() {
   $("resolution").oninput = event => {
     const value = Number(event.target.value);
     $("resVal").textContent = value.toFixed(2) + " m";
-
+    syncMapRadiusLimit();
   };
 
   $("radius").oninput = event => {
     const value = Number(event.target.value);
     $("radiusVal").textContent = value + " m";
-
   };
   const applyMapSettings = () => requestOperation("configure_map", { resolution: Number($("resolution").value), radius: Number($("radius").value) });
   $("resolution").onchange = applyMapSettings;
@@ -558,11 +632,20 @@ function installUI() {
         return;
       }
       const metadata = typeof file.arrayBuffer === 'function' ? readPNGMetadata(new Uint8Array(await file.arrayBuffer())) : null;
-      let navigation_config = { zones:[],base:null };
+      let navigation_config = { zones:[],base:null }, mapGeometry = null;
       if(metadata) {
         if(metadata.format !== 'fabtino-map' || metadata.version !== 1) throw new Error('Unsupported map metadata.');
         resolution=metadata.resolution; radius=metadata.radius; navigation_config=validateNavigation(metadata.navigation_config);
-        if(!Number.isFinite(resolution) || !Number.isFinite(radius) || resolution<=0 || radius<=0 || Math.ceil(2*radius/resolution)**2>1000000) throw new Error('Invalid saved map scale.');
+        mapGeometry={width:metadata.width==null?null:Number(metadata.width),height:metadata.height==null?null:Number(metadata.height),
+          origin_x:metadata.origin_x==null?null:Number(metadata.origin_x),origin_y:metadata.origin_y==null?null:Number(metadata.origin_y),
+          origin_yaw:Number(metadata.origin_yaw??0),frame_id:metadata.frame_id??'map'};
+        if(!Number.isFinite(resolution) || !Number.isFinite(radius) || resolution<=0 || radius<=0
+            || (mapGeometry.width!==null && (!Number.isInteger(mapGeometry.width)||mapGeometry.width<1))
+            || (mapGeometry.height!==null && (!Number.isInteger(mapGeometry.height)||mapGeometry.height<1))
+            || (mapGeometry.width!==null && mapGeometry.height!==null && mapGeometry.width*mapGeometry.height>1000000)
+            || (mapGeometry.origin_x!==null && !Number.isFinite(mapGeometry.origin_x))
+            || (mapGeometry.origin_y!==null && !Number.isFinite(mapGeometry.origin_y))
+            || !Number.isFinite(mapGeometry.origin_yaw)) throw new Error('Invalid saved map geometry.');
       }
       const image = await new Promise((resolve, reject) => {
         const img = new Image();
@@ -570,25 +653,29 @@ function installUI() {
         img.onerror = reject;
         img.src = url;
       });
-      const size = Math.ceil(2 * radius / resolution);
-      if (image.width !== image.height) throw new Error("Choose a square occupancy-map image and enter its original scale.");
+      const width=mapGeometry?.width??image.width,height=mapGeometry?.height??image.height;
+      if(mapGeometry && (image.width!==width || image.height!==height)) throw new Error('Saved PNG pixel dimensions do not match its map metadata.');
+      if(width*height>1000000) throw new Error('Map image exceeds 1,000,000 cells.');
       const canvas = document.createElement("canvas");
-      canvas.width = size;
-      canvas.height = size;
+      canvas.width = width;
+      canvas.height = height;
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(image, 0, 0, size, size);
-      const pixels = ctx.getImageData(0, 0, size, size).data;
-      const grid = new Array(size * size).fill(-1);
-      for (let py = 0; py < size; py++) {
-        for (let px = 0; px < size; px++) {
-          const p = (py * size + px) * 4;
+      ctx.drawImage(image, 0, 0, width, height);
+      const pixels = ctx.getImageData(0, 0, width, height).data;
+      const grid = new Array(width * height).fill(-1);
+      for (let py = 0; py < height; py++) {
+        for (let px = 0; px < width; px++) {
+          const p = (py * width + px) * 4;
           const luminance = (pixels[p] + pixels[p + 1] + pixels[p + 2]) / 3;
-          const gy = size - 1 - py;
-          grid[gy * size + px] = pixels[p + 3] < 128 ? -1 : luminance < 100 ? 100 : luminance > 200 ? 0 : -1;
+          const gy = height - 1 - py;
+          grid[gy * width + px] = pixels[p + 3] < 128 ? -1 : luminance < 100 ? 100 : luminance > 200 ? 0 : -1;
         }
       }
-      const requestId = requestOperation("nav_map", { mode: "known_image", resolution, radius, grid, navigation_config });
+      mapGeometry={...(mapGeometry??{}),width,height,origin_x:mapGeometry?.origin_x??-width*resolution/2,
+        origin_y:mapGeometry?.origin_y??-height*resolution/2,origin_yaw:mapGeometry?.origin_yaw??0,frame_id:mapGeometry?.frame_id??'map'};
+      radius=Math.max(width,height)*resolution/2;
+      const requestId = requestOperation("nav_map", { mode: "known_image", resolution, radius, ...mapGeometry, grid, navigation_config });
       if (!requestId) return;
       pendingKnownMap = { requestId, resolution, radius, grid };
       UIController.log("Known map sent. Collecting surrounding LiDAR scan for global relocalization…");
@@ -626,6 +713,7 @@ function installUI() {
 }
 
 function init() {
+  syncMapRadiusLimit();
   MapModel.allocate(0.05, 20);
 
   GridRenderer.init($("mapCanvas"));
@@ -635,12 +723,15 @@ function init() {
   window.__mapViewerMapState = () => MapModel.get();
 
   WebSocketManager.on("status", status => {
+    transportOpen=status.connected;
     UIController.setStatus(status.connected, status.text);
+    if(!status.connected) { telemetryFresh=false;bridgeHealthy=false;UIController.setBridge(false);UIController.setTelemetry('waiting',false); }
     features?.connection(status.connected);
   });
 
   WebSocketManager.on("open", () => {
     UIController.log("WebSocket connected");
+    UIController.setTelemetry('waiting',false);
   });
 
   WebSocketManager.on("close", () => {
@@ -681,6 +772,7 @@ function init() {
   GridRenderer.render(MapModel.get(), RobotState.get());
 
   WebSocketManager.connect();
+  setInterval(refreshFreshness,250);
 }
 
 init();

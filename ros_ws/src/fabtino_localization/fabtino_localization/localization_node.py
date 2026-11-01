@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, math, sys
+import json, math, sys, time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -34,6 +34,8 @@ class LocalizationNode(Node):
         self.declare_parameter('rotation_active_gyro_rate_threshold',0.02)
         self.declare_parameter('rotation_in_place_linear_threshold',0.08)
         self.declare_parameter('rotation_settle_time_s',0.40)
+        self.declare_parameter('stationary_imu_linear_threshold_mps',0.01)
+        self.declare_parameter('stationary_imu_angular_threshold_rps',0.02)
         # The Fabtino footprint reaches about 0.44 m along its body X axis.
         # Close LiDAR returns bound wheel translation when wheels slip at a wall.
         self.declare_parameter('translation_collision_distance_m',0.50)
@@ -49,6 +51,8 @@ class LocalizationNode(Node):
         self.rotation_active_gyro_rate_threshold=float(self.get_parameter('rotation_active_gyro_rate_threshold').value)
         self.rotation_in_place_linear_threshold=float(self.get_parameter('rotation_in_place_linear_threshold').value)
         self.rotation_settle_time_s=float(self.get_parameter('rotation_settle_time_s').value)
+        self.stationary_imu_linear_threshold=float(self.get_parameter('stationary_imu_linear_threshold_mps').value)
+        self.stationary_imu_angular_threshold=float(self.get_parameter('stationary_imu_angular_threshold_rps').value)
         self.startup_imu_yaw=None
         self.imu_yaw_offset=0.0
         self.minimum_sensor_stamp_ns=0
@@ -64,6 +68,7 @@ class LocalizationNode(Node):
         self.rotation_active=False
         self.pose_stable=True
         self.settle_started=None
+        self.stationary_since=None
         self.matcher=LidarScanMatcher(ScanMatcherConfig(enabled=bool(self.get_parameter('use_lidar_scan_matcher').value)))
         # Wheel and IMU topics carry the same capture stamp per sensor packet.
         # DDS callback ordering must not decide which yaw belongs to a scan.
@@ -117,6 +122,7 @@ class LocalizationNode(Node):
             self.last_wheel_omega=self.last_gyro_z=0.
             self.rotation_pending=self.rotation_active=False
             self.settle_started=None
+            self.stationary_since=None
             self.pending_wheels.clear();self.pending_imus.clear();self.pending_scans.clear()
             self.matcher.reset_reference()
             self.publish_pose_stable(True)
@@ -131,7 +137,8 @@ class LocalizationNode(Node):
     @staticmethod
     def localize_import(request,points,timestamp):
         grid=imported_grid(request)
-        matcher=KnownMapLocalizer(grid.data,grid.resolution,grid.radius)
+        matcher=KnownMapLocalizer(grid.data,grid.resolution,grid.radius,origin_x=grid.origin_x,
+                                  origin_y=grid.origin_y,origin_yaw=grid.origin_yaw)
         match=matcher.match(points,(0.,0.,0.),timestamp)
         if match is None:
             raise ValueError('Map could not be localized: '+matcher.last_status)
@@ -176,7 +183,11 @@ class LocalizationNode(Node):
         msg=Bool(); msg.data=stable; self.pub_pose_stable.publish(msg)
 
     def update_rotation_gate(self):
-        gyro_active=abs(self.last_gyro_z) >= self.rotation_active_gyro_rate_threshold
+        stationary=self.wheels_stationary()
+        # Once encoder motion has remained below the stationary thresholds,
+        # gyro noise must not keep the robot marked as rotating.
+        gyro_active=(not stationary and
+                     abs(self.last_gyro_z) >= self.rotation_active_gyro_rate_threshold)
         wheel_active=(
             abs(self.last_wheel_omega) >= self.rotation_pending_wheel_rate_threshold
             and self.last_odom is not None
@@ -198,6 +209,21 @@ class LocalizationNode(Node):
                 self.rotation_active=False
                 self.publish_pose_stable(True)
                 self.get_logger().info('Rotation settled; pose stability restored')
+
+    def wheels_stationary(self):
+        """Require sustained low encoder-derived velocity before suppressing IMU fusion."""
+        if self.last_odom is None:
+            self.stationary_since=None
+            return False
+        low_motion=(abs(self.last_odom.linear_velocity_mps) <= self.stationary_imu_linear_threshold and
+                    abs(self.last_odom.angular_velocity_rps) <= self.stationary_imu_angular_threshold)
+        if not low_motion:
+            self.stationary_since=None
+            return False
+        if self.stationary_since is None:
+            self.stationary_since=time.monotonic()
+            return False
+        return time.monotonic()-self.stationary_since >= self.rotation_settle_time_s
     @staticmethod
     def stamp_ns(msg):
         return msg.header.stamp.sec*1_000_000_000+msg.header.stamp.nanosec
@@ -308,6 +334,14 @@ class LocalizationNode(Node):
 
     def process_imu(self,msg):
         self.last_imu=msg
+        # Continue receiving IMU messages, but do not let stationary sensor
+        # noise alter the odometry state after encoder motion has settled.
+        if self.wheels_stationary():
+            # Keep a zero effective gyro rate for motion gates and scan matching;
+            # the raw sample remains available in ``last_imu`` for diagnostics.
+            self.last_gyro_z=0.0
+            self.update_rotation_gate()
+            return
         self.last_gyro_z=float(msg.angular_velocity.z)
         self.ekf.update_gyro(self.last_gyro_z)
         q=msg.orientation; _,_,yaw=euler_from_quaternion([q.x,q.y,q.z,q.w])
@@ -361,7 +395,7 @@ class LocalizationNode(Node):
         pose=self.ekf.pose
         scan_timestamp=float(msg.header.stamp.sec)+float(msg.header.stamp.nanosec)*1e-9
         match=self.matcher.match(pts,pose,scan_timestamp,
-            linear_velocity_mps=float(self.ekf.x[3]),angular_velocity_rps=float(self.ekf.x[4]),gyro_z_rps=float(self.last_imu.angular_velocity.z) if self.last_imu else 0.0)
+            linear_velocity_mps=float(self.ekf.x[3]),angular_velocity_rps=float(self.ekf.x[4]),gyro_z_rps=self.last_gyro_z)
         if match is not None:self.ekf.update_pose(match)
     def publish(self):
         # Repeat the state so late subscribers (including the mapper after

@@ -11,6 +11,21 @@ from fabtino_core.navigation.planner import OccupancyGrid as CoreGrid, astar
 from fabtino_core.navigation.zones import validate_config,point_denied,zone_mask,approach_target
 from fabtino_core.navigation.delivery import Delivery
 from fabtino_core.battery import BatteryConfig,evaluate_trip
+from fabtino_core.geometry import euler_from_quaternion
+
+
+def grid_from_message(msg):
+    resolution=float(msg.info.resolution)
+    origin=msg.info.origin.position
+    orientation=getattr(msg.info.origin,'orientation',None)
+    yaw=(euler_from_quaternion([orientation.x,orientation.y,orientation.z,orientation.w])[2]
+         if orientation is not None else 0.)
+    fallback=math.ceil(2*(-float(origin.x))/resolution)
+    width=int(getattr(msg.info,'width',fallback));height=int(getattr(msg.info,'height',width))
+    radius=max(width,height)*resolution/2
+    grid=CoreGrid(resolution,radius,width=width,height=height,origin_x=origin.x,origin_y=origin.y,origin_yaw=yaw)
+    grid.load(resolution,radius,msg.data,width=width,height=height,origin_x=origin.x,origin_y=origin.y,origin_yaw=yaw)
+    return grid
 
 
 class MissionManagerNode(Node):
@@ -193,14 +208,14 @@ class MissionManagerNode(Node):
         data = self.map.data
         resolution = self.map.info.resolution
         ox, oy = self.map.info.origin.position.x, self.map.info.origin.position.y
+        navigation_grid=grid_from_message(self.map)
         blocked=None
         if self.config['zones']:
-            navigation_grid=CoreGrid(resolution,-ox);navigation_grid.load(resolution,-ox,data)
             blocked=navigation_grid.inflated_obstacles(float(self.get_parameter('navigation_clearance_m').value))|zone_mask(navigation_grid,self.config['zones'],float(self.get_parameter('navigation_clearance_m').value))
         best = None
         for gy in range(1, height-1):
             for gx in range(1, width-1):
-                x, y = ox+(gx+.5)*resolution, oy+(gy+.5)*resolution
+                x, y = navigation_grid.point((gx,gy))
                 key = (round(x, 6), round(y, 6))
                 if data[gy*width+gx] != 0 or key in self.visited_frontiers or (blocked is not None and blocked[gy,gx]):
                     continue
@@ -325,8 +340,7 @@ class MissionManagerNode(Node):
             return False
         try:
             origin=self.map.info.origin.position
-            grid=CoreGrid(self.map.info.resolution,-origin.x)
-            grid.load(grid.resolution,grid.radius,self.map.data)
+            grid=grid_from_message(self.map)
             task=self.delivery.tasks[self.delivery.index]
             self.delivery_retarget_attempts+=1
             buffer=.12+float(self.get_parameter('delivery_retarget_buffer_step_m').value)*self.delivery_retarget_attempts
@@ -418,8 +432,7 @@ class MissionManagerNode(Node):
         # Mission policy is fixed for the simulator: refuse below 15%, warn through 20%.
         config=BatteryConfig.from_dict(dict(config.to_dict(),reserve_pct=15.0,warning_pct=20.0))
         origin=self.map.info.origin.position
-        grid=CoreGrid(self.map.info.resolution,-origin.x)
-        grid.load(grid.resolution,grid.radius,self.map.data)
+        grid=grid_from_message(self.map)
         zone_clearance=float(self.get_parameter('navigation_clearance_m').value)
         minimum_obstacle_clearance=(float(self.get_parameter('robot_width_m').value)/2.0+
                                     float(self.get_parameter('robot_safety_margin_m').value))
@@ -483,8 +496,7 @@ class MissionManagerNode(Node):
             self.delivery_retarget_attempts=0
             if self.delivery.state=='returning':target=self.check_base()
             else:
-                grid=CoreGrid(self.map.info.resolution,-self.map.info.origin.position.x)
-                grid.load(grid.resolution,grid.radius,self.map.data)
+                grid=grid_from_message(self.map)
                 task=self.delivery.tasks[self.delivery.index]
                 target=approach_target(grid,self.pose,self.config['zones'],task['zone_id'],
                     float(self.get_parameter('navigation_clearance_m').value),

@@ -1,8 +1,8 @@
 {
   "result": "passed",
-  "elapsed_s": 75.285,
-  "viewer_hz": 9.32,
-  "sensor_age_p95_s": 0.0629,
+  "elapsed_s": 73.404,
+  "viewer_hz": 9.66,
+  "sensor_age_p95_s": 0.0558,
   "tasks_completed": 2,
   "checks": [
     "all sampled physical footprint positions outside both circles",

@@ -14,6 +14,12 @@ def viewer():
 def zone():return dict(id='a',name='Station',x=1.,y=0.,radius=.2)
 
 
+def test_gateway_defaults_to_loopback_while_remote_access_controls_are_missing(viewer):
+    _,node=viewer
+    assert node.get_parameter('host').value=='127.0.0.1'
+    assert node.get_parameter('port').value==8765
+
+
 def test_config_delivery_and_return_requests_are_forwarded_and_bad_zones_are_atomic(viewer):
     bus,node=viewer
     node.cmd('set_navigation_config',dict(request_id='zones',zones=[zone()],base=None))
@@ -50,4 +56,5 @@ def test_live_scan_layer_expires_without_replaying_old_returns(viewer):
     cloud.fields=[ros.PointField(name=name,offset=index*4,datatype=7) for index,name in enumerate(('x','y','z'))]
     cloud.data=struct.pack('<fff',1.,2.,0.);node.latest_live_cloud=cloud
     assert node.packet()['live_points']==[[1.,2.,0.]]
-    bus.tick(.6);assert node.packet()['live_points']==[]
+    bus.tick(.6);assert node.packet()['live_points']==[[1.,2.,0.]]
+    bus.tick(1.);assert node.packet()['live_points']==[]

@@ -29,17 +29,17 @@ def test_temporary_returns_are_immediate_navigation_obstacles_but_not_static():
     assert 100 not in node.pub_navigation.messages[-1].data
 
 
-def test_stationary_returns_need_over_three_seconds_and_free_rays_remove_departed_object():
+def test_stationary_returns_promote_to_retained_static_map():
     bus,node=setup()
     for index in range(31):observe(bus,node)
     assert node.pub_points.messages[-1].width==0 # exactly 3 seconds
     observe(bus,node)
     assert node.pub_points.messages[-1].width==1
     assert 100 in node.grid.data
-    observe(bus,node,2.)
+    for _ in range(node.free_clear_observations):observe(bus,node,2.)
     cell=node.grid.cell(1.,0.)
-    assert node.grid.data[cell[1],cell[0]]==0
-    assert cell not in node.static_filter.candidates
+    assert node.grid.data[cell[1],cell[0]]==100
+    assert node.grid.static_data[cell[1],cell[0]]==100
 
 
 def test_translating_robot_observes_the_same_fixed_world_hit():

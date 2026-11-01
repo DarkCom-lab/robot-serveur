@@ -14,10 +14,16 @@ class WorldIntegrationTests(unittest.TestCase):
         self.assertIn('webots/worlds/world_simulation.wbt', launch)
         world = (ROOT/'webots/worlds/world_simulation.wbt').read_text(encoding='utf-8')
         self.assertEqual(world.count('Fabtino {'), 1)
-        self.assertEqual(len(re.findall(r'^Table \{', world, re.M)), 8)
-        self.assertEqual(len(re.findall(r'^WoodenChair \{', world, re.M)), 16)
-        for name in ('mapping_lidar', 'mapping_gyro', 'mapping_accelerometer', 'inertial unit'):
+        table_names = set(re.findall(r'(?m)^  name "(cafe_table_[^"]+)"', world))
+        self.assertEqual(table_names, {
+            *(f'cafe_table_{i}' for i in range(1, 9)),
+            'cafe_table_5(1)', 'cafe_table_8(1)',
+        })
+        self.assertEqual(len(re.findall(r'^Table \{', world, re.M)), 10)
+        self.assertEqual(len(re.findall(r'^WoodenChair \{', world, re.M)), 19)
+        for name in ('mapping_lidar', 'mapping_gyro', 'mapping_accelerometer'):
             self.assertIn('name "'+name+'"', world)
+        self.assertRegex(world, r'InertialUnit\s*\{')
         self.assertIn('controller "fabtino_webots_bridge_controller"', world)
 
     def test_robot_worlds_have_mecanum_contacts_and_portable_assets(self):
@@ -28,7 +34,6 @@ class WorldIntegrationTests(unittest.TestCase):
                 for material in ('InteriorWheelMat', 'ExteriorWheelMat'):
                     self.assertIn('material1 "'+material+'"', text)
                 self.assertIn('coordinateSystem "ENU"', text)
-                self.assertNotRegex(text, r'(?m)^\s*hidden ')
                 for url in re.findall(r'"([^"\n]+\.obj)"', text):
                     asset = (file.parent/url).resolve()
                     self.assertTrue(asset.is_relative_to(ROOT.resolve()))

@@ -48,15 +48,16 @@ def segment_denied(a,b,zones,clearance=0.):
 def zone_mask(grid,zones,clearance=0.):
     """Block an entire cell intersecting the expanded circle, not just its centre."""
     blocked=np.zeros_like(grid.data,dtype=bool)
-    coordinates=(np.arange(grid.size)+.5)*grid.resolution-grid.radius
+    lx=(np.arange(grid.width)+.5)*grid.resolution
+    ly=(np.arange(grid.height)+.5)*grid.resolution
+    local_x,local_y=np.meshgrid(lx,ly)
+    c,s=math.cos(grid.origin_yaw),math.sin(grid.origin_yaw)
+    world_x=grid.origin_x+c*local_x-s*local_y
+    world_y=grid.origin_y+s*local_x+c*local_y
     padding=grid.resolution/math.sqrt(2.)
     for zone in zones:
         radius=zone['radius']+clearance+padding
-        xs=np.flatnonzero(abs(coordinates-zone['x'])<=radius)
-        ys=np.flatnonzero(abs(coordinates-zone['y'])<=radius)
-        if not len(xs) or not len(ys):continue
-        region=(coordinates[ys,None]-zone['y'])**2+(coordinates[None,xs]-zone['x'])**2<=radius**2
-        blocked[np.ix_(ys,xs)]|=region
+        blocked|=(world_x-zone['x'])**2+(world_y-zone['y'])**2<=radius**2
     return blocked
 
 
@@ -97,7 +98,7 @@ def approach_target(grid,pose,zones,zone_id,clearance=.6,buffer=.12,allow_unknow
                 or (abs(distance-best[0])<=1e-6 and steps<best[1])):best=(distance,steps,x,y)
         for dx,dy in ((1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)):
             nx,ny=gx+dx,gy+dy
-            if not (0<=nx<grid.size and 0<=ny<grid.size) or reached[ny,nx] or not grid.traversable((nx,ny),blocked,allow_unknown):continue
+            if not (0<=nx<grid.width and 0<=ny<grid.height) or reached[ny,nx] or not grid.traversable((nx,ny),blocked,allow_unknown):continue
             if (gx,gy)==start and segment_denied(pose[:2],grid.point((nx,ny)),zones,clearance):continue
             if dx and dy and (blocked[gy,nx] or blocked[ny,gx]):continue
             reached[ny,nx]=True;queue.append(((nx,ny),steps+1))

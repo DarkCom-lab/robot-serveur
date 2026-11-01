@@ -20,22 +20,28 @@ async def run_pipeline():
     transport=module.BridgeTransport(port=0);transport.start()
     assert transport.ready.wait(2.),'Controller TCP server did not start'
     bus=ros.Bus({'viewer_gateway':{'host':'127.0.0.1','port':0},
-                 'webots_bridge':{'port':transport.port},
+                 # Match the real launch configuration rather than the node's
+                 # lower-rate test default.
+                 'webots_bridge':{'port':transport.port,'scan_period_s':0.10},
                  'mapping':{'radius_m':6.,'resolution_m':.1}},realtime=True)
     nodes={key:kind() for key,kind in ros.adapters().items()}
     robot=RobotDevices(module,transport)
     running=True
-    sensor_ages=[];received=[];start=time.monotonic()
+    sensor_ages=[];last_sensor_age_stamp_ns=None;received=[];start=time.monotonic()
 
     async def pump():
+        nonlocal last_sensor_age_stamp_ns
         last=time.monotonic()
         while running:
             now=time.monotonic()
             if now-last>=.02:
                 robot.step(now-last);last=now
             bus.tick()
-            if nodes['bridge'].connected and nodes['bridge'].last_sensor_stamp_ns is not None:
-                sensor_ages.append((time.time_ns()-nodes['bridge'].last_sensor_stamp_ns)*1e-9)
+            sensor_stamp=nodes['bridge'].last_sensor_stamp_ns
+            if (nodes['bridge'].connected and sensor_stamp is not None
+                    and sensor_stamp!=last_sensor_age_stamp_ns):
+                sensor_ages.append((time.time_ns()-sensor_stamp)*1e-9)
+                last_sensor_age_stamp_ns=sensor_stamp
             await asyncio.sleep(.005)
 
     async def until(predicate,timeout=5.):
@@ -98,6 +104,9 @@ async def run_pipeline():
             await until(lambda:nodes['bridge'].connected and nodes['bridge'].pub_scan.messages[-1].header.stamp!=old_stamp,3.)
             reconnect_delay=time.monotonic()-reconnect_start
             assert reconnect_delay<1.5
+            # The freshness metric below describes steady state. The deliberate
+            # outage is already measured separately by reconnect_delay.
+            sensor_ages.clear()
 
             robot.rear_wall=True
             await asyncio.sleep(.15)
@@ -149,9 +158,10 @@ async def run_pipeline():
         scan_packets=[stamp for stamp,packet in received if packet.get('type')=='scan']
         rate=(len(scan_packets)-1)/(scan_packets[-1]-scan_packets[0])
         ages=sorted(sensor_ages)
+        p50=ages[int(.50*(len(ages)-1))]
         p95=ages[int(.95*(len(ages)-1))]
         assert rate>=7.,f'Viewer rate fell to {rate:.1f} Hz'
-        assert p95<.2,f'Sensor age p95 is {p95:.3f}s'
+        assert p95<.2,f'Sensor age p95 is {p95:.3f}s (p50={p50:.3f}s, max={ages[-1]:.3f}s, samples={len(ages)})'
         assert not bus.errors,bus.errors
         report={'transport':'real TCP and WebSocket','ros':'in-process message/topic doubles',
                 'robot':'ideal wheel kinematics and raycast LiDAR; not Webots physics',

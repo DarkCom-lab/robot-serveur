@@ -47,6 +47,7 @@ class MappingNode(Node):
         self.declare_parameter('static_persistence_s',3.0)
         self.declare_parameter('static_observation_gap_s',.45)
         self.declare_parameter('dynamic_obstacle_lifetime_s',.5)
+        self.declare_parameter('free_clear_observations',3)
 
         resolution = float(self.get_parameter('resolution_m').value)
         radius = float(self.get_parameter('radius_m').value)
@@ -67,7 +68,10 @@ class MappingNode(Node):
                                               float(self.get_parameter('static_observation_gap_s').value))
         self.dynamic_cells={}
         self.dynamic_lifetime_ns=round(float(self.get_parameter('dynamic_obstacle_lifetime_s').value)*1e9)
+        self.free_clear_observations=max(1,int(self.get_parameter('free_clear_observations').value))
+        self.free_observations={}
         self.revision = 0
+        self.latest_integrated_scan_ns = 0
         self.map_id='startup'
         self.mode='live'
         self.minimum_scan_stamp_ns=0
@@ -180,6 +184,7 @@ class MappingNode(Node):
             self.last_map_publish_time = now
         status = String()
         status.data = json.dumps(dict(revision=self.grid.revision,robot_x=self.pose[0],robot_y=self.pose[1],
+                                     latest_scan_stamp_ns=str(self.latest_integrated_scan_ns),
                                      queued_scans=len(self.scan_queue),map_id=getattr(self,'map_id','startup'),
                                      mode=getattr(self,'mode','live'),static_persistence_s=self.static_filter.persistence_ns*1e-9,
                                      pending_static_points=len(self.static_filter.candidates)))
@@ -189,33 +194,79 @@ class MappingNode(Node):
         stamp_ns=scan.header.stamp.sec*1_000_000_000+scan.header.stamp.nanosec
         if self.mode=='live' and self.static_filter.last_ns is not None and stamp_ns<=self.static_filter.last_ns:
             return
+        self.latest_integrated_scan_ns=stamp_ns
         x0, y0, yaw = pose
         points = []
+        safety_points = []
+        masked = getattr(scan, 'intensities', [])
+        mask_is_explicit = len(masked) == len(scan.ranges)
         valid_returns = 0
-        for index in range(0, len(scan.ranges), self.lidar_subsample):
-            distance = scan.ranges[index]
-            distance = float(distance)
-            if not math.isfinite(distance) or distance < scan.range_min or distance > scan.range_max:
+        max_range = float(scan.range_max)
+        max_tolerance = max(1e-6, abs(max_range) * 1e-6)
+        # Every ray contributes to occupancy/safety. lidar_subsample is kept
+        # only for the display point cloud, so thin returns cannot disappear
+        # from the navigation map.
+        for index, raw_distance in enumerate(scan.ranges):
+            if mask_is_explicit and float(masked[index]) == 0.0:
                 continue
+            distance = float(raw_distance)
             angle = float(scan.angle_min + index * scan.angle_increment)
+            if math.isnan(distance) or distance == -math.inf or distance < scan.range_min:
+                continue
+            no_return = distance == math.inf or distance > max_range or distance >= max_range - max_tolerance
+            if no_return:
+                # In known-map mode the imported grid is authoritative and
+                # immutable. Live clearing only updates the scan-built map.
+                if self.mode == 'live' and math.isfinite(max_range) and max_range > scan.range_min:
+                    robot_point = lidar_polar_to_robot(max_range, angle, self.lidar_angle_sign)
+                    wx, wy = robot_to_world_point(pose, robot_point)
+                    safety_points.append((wx, wy, 0.0, False, index))
+                continue
+            if not math.isfinite(distance) or distance > max_range:
+                continue
             robot_point = lidar_polar_to_robot(distance, angle, self.lidar_angle_sign)
             wx, wy = robot_to_world_point(pose, robot_point)
-            points.append((wx, wy, 0.0))
+            safety_points.append((wx, wy, 0.0, True, index))
             valid_returns += 1
 
+        points = [point[:3] for point in safety_points
+                  if point[3] and point[4] % self.lidar_subsample == 0]
+
         cells={}
-        for wx,wy,_ in points:
+        for wx,wy,_,has_return,_ in safety_points:
+            if not has_return:
+                continue
             cell=self.grid.cell(wx,wy)
             if cell is not None:cells.setdefault(cell,[]).append((wx,wy))
         confirmed=set()
+        free_cells=set()
         if self.mode=='live':
-            freed=set()
-            for wx,wy,_ in points:
-                freed.update(self.grid.update_ray(x0,y0,wx,wy,mark_endpoint=False,
-                    clear_occupied=True,protected_cells=cells))
-            self.static_filter.forget(freed)
+            for wx,wy,_,has_return,_ in safety_points:
+                free_cells.update(self.grid.ray_cells(x0,y0,wx,wy,protected_cells=cells))
+            for cell in free_cells:
+                # Confirmed static map geometry is a separate retained layer.
+                # Later rays can clear transient/live evidence, but must not
+                # erase a wall or other obstacle already learned into it.
+                if self.grid.static_data[cell[1],cell[0]] == 100:
+                    self.free_observations.pop(cell,None)
+                    continue
+                count=self.free_observations.get(cell,0)+1
+                self.free_observations[cell]=count
+                if count>=self.free_clear_observations:
+                    # Repeated free-space observations classify both unknown
+                    # cells and stale occupied cells as free. Endpoints from
+                    # any finite return in this scan are excluded by
+                    # ray_cells(..., protected_cells=cells) above.
+                    if self.grid.data[cell[1],cell[0]] != 0:
+                        self.grid.set_cell(cell,0)
+                    self.free_observations.pop(cell,None)
+                    self.static_filter.forget((cell,))
+            for cell in cells:
+                self.free_observations.pop(cell,None)
             confirmed=self.static_filter.observe(cells,stamp_ns)
-            for cell in confirmed:self.grid.set_cell(cell,100)
+            for cell in confirmed:
+                self.grid.set_cell(cell,100)
+                self.grid.static_data[cell[1],cell[0]]=100
         else:confirmed={cell for cell in cells if self.grid.data[cell[1],cell[0]]==100}
         for cell in cells:self.dynamic_cells[cell]=stamp_ns
 
@@ -234,11 +285,12 @@ class MappingNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = frame
         msg.info.resolution = float(resolution)
-        msg.info.width = int(self.grid.size)
-        msg.info.height = int(self.grid.size)
-        msg.info.origin.position.x = -float(radius)
-        msg.info.origin.position.y = -float(radius)
-        msg.info.origin.orientation.w=1.0
+        msg.info.width = int(self.grid.width)
+        msg.info.height = int(self.grid.height)
+        msg.info.origin.position.x = float(self.grid.origin_x)
+        msg.info.origin.position.y = float(self.grid.origin_y)
+        msg.info.origin.orientation.z=math.sin(float(self.grid.origin_yaw)*.5)
+        msg.info.origin.orientation.w=math.cos(float(self.grid.origin_yaw)*.5)
         msg.data = [int(value) for value in np.asarray(data).reshape(-1)]
         publisher.publish(msg)
 
@@ -281,6 +333,7 @@ class MappingNode(Node):
         self.pending_import=None
         self.static_filter=StaticPointFilter(self.grid.resolution,self.static_filter.persistence_ns*1e-9,self.static_filter.max_gap_ns*1e-9)
         self.dynamic_cells.clear()
+        self.free_observations.clear()
         self.map_id=str(self.get_clock().now().nanoseconds)
         self.publish_grid(self.pub_map,self.grid.data,self.grid.resolution,self.grid.radius,'map')
         self.publish_cloud([],self.get_clock().now().to_msg())
@@ -295,6 +348,33 @@ class MappingNode(Node):
                                 state=state,reason=reason,map_id=self.map_id,mode=self.mode,
                                 stamp_ns=self.get_clock().now().nanoseconds))
         self.pub_operation.publish(msg)
+
+    def expand_live_grid(self, radius):
+        """Grow the centered live map without discarding already mapped cells."""
+        old=self.grid
+        expanded=CoreGrid(old.resolution,float(radius))
+        dx=round((old.origin_x-expanded.origin_x)/old.resolution)
+        dy=round((old.origin_y-expanded.origin_y)/old.resolution)
+        src_x0=max(0,-dx);src_y0=max(0,-dy)
+        src_x1=min(old.width,expanded.width-dx);src_y1=min(old.height,expanded.height-dy)
+        if src_x1>src_x0 and src_y1>src_y0:
+            dst_x0=src_x0+dx;dst_y0=src_y0+dy
+            expanded.data[dst_y0:dst_y0+src_y1-src_y0,dst_x0:dst_x0+src_x1-src_x0]=old.data[src_y0:src_y1,src_x0:src_x1]
+            expanded.static_data[dst_y0:dst_y0+src_y1-src_y0,dst_x0:dst_x0+src_x1-src_x0]=old.static_data[src_y0:src_y1,src_x0:src_x1]
+
+        self.static_filter.candidates={
+            cell:candidate for candidate in self.static_filter.candidates.values()
+            if (cell:=expanded.cell(candidate.x,candidate.y)) is not None
+        }
+        self.free_observations={
+            cell:count for old_cell,count in self.free_observations.items()
+            if (cell:=expanded.cell(*old.point(old_cell))) is not None
+        }
+        self.dynamic_cells={
+            cell:stamp for old_cell,stamp in self.dynamic_cells.items()
+            if (cell:=expanded.cell(*old.point(old_cell))) is not None
+        }
+        self.grid=expanded
 
     def request_cb(self,msg):
         request=json.loads(msg.data)
@@ -313,6 +393,15 @@ class MappingNode(Node):
         if kind=='configure_map':
             try:
                 resolution,radius,_=map_dimensions(request)
+                if (self.mode=='live' and math.isclose(resolution,self.grid.resolution,rel_tol=0.,abs_tol=1e-12)
+                        and radius>=self.grid.radius):
+                    self.expand_live_grid(radius)
+                    self.map_id=request['request_id']
+                    self.publish_grid(self.pub_map,self.grid.data,self.grid.resolution,self.grid.radius,'map')
+                    self.publish_local()
+                    self.last_map_publish_time=0.
+                    self.operation_status(request,'complete')
+                    return
                 self.grid=CoreGrid(resolution,radius)
             except (ValueError,KeyError,TypeError) as exc:
                 self.operation_status(request,'error',str(exc));return
@@ -338,6 +427,7 @@ class MappingNode(Node):
             self.minimum_scan_stamp_ns=self.get_clock().now().nanoseconds
             self.pending_import=None
             self.static_filter.clear();self.dynamic_cells.clear()
+            self.free_observations.clear()
             self.publish_grid(self.pub_map,self.grid.data,self.grid.resolution,self.grid.radius,'map')
             self.publish_cloud([],self.get_clock().now().to_msg())
             self.publish_cloud([],self.get_clock().now().to_msg(),self.pub_live_points)

@@ -8,7 +8,7 @@ def generate_launch_description():
         # this localization adapter currently reduces the four encoders to
         # left/right averages, its equivalent differential track is 2*K.
         Node(package='fabtino_localization',executable='fabtino-localization',name='localization',parameters=[{'track_width_m':1.043834,'wheel_radius_m':0.100,'lidar_angle_sign':-1.0,'use_imu_yaw_reference':True,'rotation_pending_wheel_rate_threshold':0.05,'rotation_confirm_gyro_rate_threshold':0.03,'rotation_active_gyro_rate_threshold':0.02,'rotation_in_place_linear_threshold':0.08,'rotation_settle_time_s':0.40}]),
-        Node(package='fabtino_mapping',executable='fabtino-mapping',name='mapping',parameters=[{'resolution_m':0.10,'radius_m':20.0,'lidar_angle_sign':-1.0,'lidar_subsample':8,'scan_queue_size':256,'pose_history_size':512,'pose_match_tolerance_s':0.10,'publish_period_s':0.05,'map_publish_period_s':0.50}]),
+        Node(package='fabtino_mapping',executable='fabtino-mapping',name='mapping',parameters=[{'resolution_m':0.10,'radius_m':40.0,'lidar_angle_sign':-1.0,'lidar_subsample':8,'scan_queue_size':256,'pose_history_size':512,'pose_match_tolerance_s':0.10,'publish_period_s':0.05,'map_publish_period_s':0.50}]),
         Node(package='fabtino_navigation',executable='fabtino-mission-manager',name='mission_manager',parameters=[{'state_file':str(Path.home()/'.local/share/fabtino/navigation.json'),'battery_required':True,'battery_auto_return_margin_pct':0.0}]),
         # Battery model (placeholder coefficients: calibrate on the real robot).
         # consumption_scale>1 drains faster in simulation; reserve_pct is the refusal threshold.

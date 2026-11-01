@@ -5,7 +5,7 @@
     {
       "suite": "fabtino_core",
       "result": "passed",
-      "elapsed_s": 2.337,
+      "elapsed_s": 1.659,
       "tests": 64,
       "failures": 0,
       "errors": 0,
