@@ -109,12 +109,18 @@ class GlobalPlannerNode(Node):
         if navigation:self.last_navigation_map_ns=msg.header.stamp.sec*1_000_000_000+msg.header.stamp.nanosec
         elif self.last_navigation_map_ns is not None and now-self.last_navigation_map_ns<600_000_000:return
         resolution = float(msg.info.resolution)
-        radius = -float(msg.info.origin.position.x)
-        candidate = CoreGrid(resolution, radius)
-        candidate.load(resolution, radius, msg.data)
+        width,height=int(msg.info.width),int(msg.info.height)
+        origin=msg.info.origin.position
+        origin_yaw=euler_from_quaternion([msg.info.origin.orientation.x,msg.info.origin.orientation.y,
+                                          msg.info.origin.orientation.z,msg.info.origin.orientation.w])[2]
+        radius=max(width,height)*resolution/2
+        candidate = CoreGrid(resolution,radius,width=width,height=height,origin_x=origin.x,origin_y=origin.y,origin_yaw=origin_yaw)
+        candidate.load(resolution,radius,msg.data,width=width,height=height,origin_x=origin.x,origin_y=origin.y,origin_yaw=origin_yaw)
         if (self.grid is not None
                 and self.grid.resolution == candidate.resolution
-                and self.grid.radius == candidate.radius
+                and self.grid.width == candidate.width and self.grid.height == candidate.height
+                and self.grid.origin_x == candidate.origin_x and self.grid.origin_y == candidate.origin_y
+                and self.grid.origin_yaw == candidate.origin_yaw
                 and np.array_equal(self.grid.static_data, candidate.static_data)):
             return
         self.grid = candidate
@@ -318,9 +324,9 @@ class GlobalPlannerNode(Node):
         route = self.path if route is None else route
         if not route:
             return None
-        size = self.grid.size
+        width,height = self.grid.width,self.grid.height
         if any(not (isinstance(cell, (tuple, list)) and len(cell) == 2
-                    and 0 <= int(cell[0]) < size and 0 <= int(cell[1]) < size)
+                    and 0 <= int(cell[0]) < width and 0 <= int(cell[1]) < height)
                for cell in route):
             return None
         valid = list(enumerate(route))
@@ -332,7 +338,7 @@ class GlobalPlannerNode(Node):
         remaining = route[nearest_index:]
         for x, y in remaining:
             x, y = int(x), int(y)
-            if not (0 <= x < size and 0 <= y < size) or blocked[y, x]:
+            if not (0 <= x < width and 0 <= y < height) or blocked[y, x]:
                 return None
         # Advance the start while keeping the closest old waypoint. The publish
         # method replaces this first cell with the latest robot pose.
@@ -570,14 +576,22 @@ class GlobalPlannerNode(Node):
         if radius<=0:return blocked
         hard=self._inflated_obstacles_cached(float(self.get_parameter('start_escape_hard_margin_m').value))
         if hard[start[1],start[0]]:return blocked           # really touching an obstacle: do not guess
-        if self.zones and zone_mask(self.grid,self.zones,zone_clearance)[start[1],start[0]]:return blocked
+        # The cell mask is deliberately conservative: it marks a cell blocked
+        # when any part of the cell touches the expanded zone. The continuous
+        # robot pose was checked against the exact zone boundary in plan(), and
+        # outgoing edges are checked with segment_denied(). Permit just that
+        # start cell so a robot safely outside a zone can depart it.
+        if self.zones and point_denied(self.pose[0],self.pose[1],self.zones,zone_clearance):return blocked
         zones=zone_mask(self.grid,self.zones,zone_clearance) if self.zones else None
         cells=int(math.ceil(radius/self.grid.resolution));relaxed=blocked.copy()
-        for gy in range(max(0,start[1]-cells),min(self.grid.size,start[1]+cells+1)):
-            for gx in range(max(0,start[0]-cells),min(self.grid.size,start[0]+cells+1)):
+        for gy in range(max(0,start[1]-cells),min(self.grid.height,start[1]+cells+1)):
+            for gx in range(max(0,start[0]-cells),min(self.grid.width,start[0]+cells+1)):
                 if math.hypot(gx-start[0],gy-start[1])*self.grid.resolution>radius or hard[gy,gx]:continue
                 if zones is not None and zones[gy,gx]:continue
                 relaxed[gy,gx]=False
+        # Relaxation never grants a path through the zone: edge_allowed() checks
+        # the continuous segment from the robot pose to its first grid point.
+        relaxed[start[1],start[0]]=False
         return relaxed
 
     def publish_path(self):

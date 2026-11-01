@@ -17,18 +17,34 @@ import numpy as np
 class GridSpec:
     resolution: float = 0.05
     radius: float = 20.0
+    width: int | None = None
+    height: int | None = None
+    origin_x: float | None = None
+    origin_y: float | None = None
+    origin_yaw: float = 0.0
 
 
 class OccupancyGrid:
-    def __init__(self, resolution: float = 0.05, radius: float = 20.0) -> None:
-        self.spec = GridSpec(float(resolution), float(radius))
+    def __init__(self, resolution: float = 0.05, radius: float = 20.0, *, width=None, height=None,
+                 origin_x=None, origin_y=None, origin_yaw=0.0) -> None:
+        self.spec = GridSpec(float(resolution), float(radius), width, height, origin_x, origin_y, float(origin_yaw))
         self._allocate()
 
     def _allocate(self) -> None:
-        if self.spec.resolution <= 0 or self.spec.radius <= 0:
+        if not math.isfinite(self.spec.resolution) or not math.isfinite(self.spec.radius) or self.spec.resolution <= 0 or self.spec.radius <= 0:
             raise ValueError("resolution and radius must be positive")
-        self.size = int(math.ceil(2 * self.spec.radius / self.spec.resolution))
-        self.data = np.full((self.size, self.size), -1, dtype=np.int8)
+        default_size = int(math.ceil(2 * self.spec.radius / self.spec.resolution))
+        self.width = int(self.spec.width if self.spec.width is not None else default_size)
+        self.height = int(self.spec.height if self.spec.height is not None else default_size)
+        if self.width < 1 or self.height < 1 or self.width*self.height > 1_000_000:
+            raise ValueError("map width and height must be positive and contain at most 1,000,000 cells")
+        self.origin_x = float(self.spec.origin_x if self.spec.origin_x is not None else -self.spec.radius)
+        self.origin_y = float(self.spec.origin_y if self.spec.origin_y is not None else -self.spec.radius)
+        self.origin_yaw = float(self.spec.origin_yaw)
+        if not all(math.isfinite(v) for v in (self.origin_x,self.origin_y,self.origin_yaw)):
+            raise ValueError("map origin must be finite")
+        self.size = max(self.width,self.height)  # compatibility for older square-grid clients
+        self.data = np.full((self.height, self.width), -1, dtype=np.int8)
         self.static_data = self.data.copy()
         self.revision = getattr(self, "revision", 0) + 1
 
@@ -46,20 +62,23 @@ class OccupancyGrid:
         self.revision += 1
 
     def cell(self, x: float, y: float) -> tuple[int, int] | None:
-        gx = int(math.floor((float(x) + self.radius) / self.resolution))
-        gy = int(math.floor((float(y) + self.radius) / self.resolution))
-        if 0 <= gx < self.size and 0 <= gy < self.size:
+        dx,dy=float(x)-self.origin_x,float(y)-self.origin_y
+        c,s=math.cos(self.origin_yaw),math.sin(self.origin_yaw)
+        gx = int(math.floor((c*dx+s*dy) / self.resolution))
+        gy = int(math.floor((-s*dx+c*dy) / self.resolution))
+        if 0 <= gx < self.width and 0 <= gy < self.height:
             return gx, gy
         return None
 
     def point(self, cell: tuple[int, int]) -> tuple[float, float]:
         gx, gy = cell
-        return ((gx + 0.5) * self.resolution - self.radius,
-                (gy + 0.5) * self.resolution - self.radius)
+        x,y=(gx+.5)*self.resolution,(gy+.5)*self.resolution
+        c,s=math.cos(self.origin_yaw),math.sin(self.origin_yaw)
+        return (self.origin_x+c*x-s*y,self.origin_y+s*x+c*y)
 
     def set_cell(self, cell: tuple[int, int], value: int) -> None:
         gx, gy = cell
-        if 0 <= gx < self.size and 0 <= gy < self.size:
+        if 0 <= gx < self.width and 0 <= gy < self.height:
             self.data[gy, gx] = int(value)
 
     def update_ray(self, x0: float, y0: float, x1: float, y1: float,
@@ -80,13 +99,28 @@ class OccupancyGrid:
         self.revision += 1
         return freed
 
-    def load(self, resolution: float, radius: float, values: Sequence[int]) -> None:
-        self.spec = GridSpec(float(resolution), float(radius))
+    def ray_cells(self, x0: float, y0: float, x1: float, y1: float,
+                  protected_cells=()) -> set[tuple[int, int]]:
+        """Cells crossed before the endpoint, without changing occupancy."""
+        dx, dy = x1 - x0, y1 - y0
+        steps = max(1, int(math.ceil(math.hypot(dx, dy) / (self.resolution * 0.7))))
+        protected = set(protected_cells)
+        cells = set()
+        for i in range(steps):
+            t = i / steps
+            cell = self.cell(x0 + dx * t, y0 + dy * t)
+            if cell is not None and cell not in protected:
+                cells.add(cell)
+        return cells
+
+    def load(self, resolution: float, radius: float, values: Sequence[int], *, width=None, height=None,
+             origin_x=None, origin_y=None, origin_yaw=0.0) -> None:
+        self.spec = GridSpec(float(resolution), float(radius), width, height, origin_x, origin_y, float(origin_yaw))
         self._allocate()
         flat = np.asarray(list(values), dtype=np.int8)
-        if flat.size != self.size * self.size:
+        if flat.size != self.width * self.height:
             raise ValueError("navigation map size does not match resolution/radius")
-        self.data[:, :] = flat.reshape((self.size, self.size))
+        self.data[:, :] = flat.reshape((self.height, self.width))
         self.static_data = self.data.copy()
         self.revision += 1
 
@@ -124,8 +158,8 @@ class OccupancyGrid:
                 if math.hypot(dx,dy)*self.resolution<=radius+1e-9:
                     offsets.append((dx,dy))
         for dx,dy in offsets:
-            src_y0=max(0,-dy);src_y1=min(self.size,self.size-dy)
-            src_x0=max(0,-dx);src_x1=min(self.size,self.size-dx)
+            src_y0=max(0,-dy);src_y1=min(self.height,self.height-dy)
+            src_x0=max(0,-dx);src_x1=min(self.width,self.width-dx)
             if src_y0>=src_y1 or src_x0>=src_x1:continue
             dst_y0=src_y0+dy;dst_y1=src_y1+dy
             dst_x0=src_x0+dx;dst_x1=src_x1+dx
@@ -134,7 +168,7 @@ class OccupancyGrid:
 
     def frontier_count(self) -> int:
         """Number of free cells touching at least one unknown cell."""
-        if self.size < 3:
+        if self.width < 3 or self.height < 3:
             return 0
         free = self.data == 0
         unknown = self.data < 0
@@ -147,15 +181,15 @@ class OccupancyGrid:
 
     def traversable(self, cell: tuple[int, int], blocked: np.ndarray, allow_unknown: bool = True) -> bool:
         gx, gy = cell
-        if not (0 <= gx < self.size and 0 <= gy < self.size) or blocked[gy, gx]:
+        if not (0 <= gx < self.width and 0 <= gy < self.height) or blocked[gy, gx]:
             return False
         return bool(self.data[gy, gx] == 0 or (allow_unknown and self.data[gy, gx] < 0))
 
     def nearest_free(self, cell: tuple[int, int], blocked: np.ndarray, limit: int = 30) -> tuple[int, int] | None:
         gx, gy = cell
         candidates = []
-        for y in range(max(0, gy - limit), min(self.size, gy + limit + 1)):
-            for x in range(max(0, gx - limit), min(self.size, gx + limit + 1)):
+        for y in range(max(0, gy - limit), min(self.height, gy + limit + 1)):
+            for x in range(max(0, gx - limit), min(self.width, gx + limit + 1)):
                 if self.traversable((x, y), blocked):
                     candidates.append((abs(x - gx) + abs(y - gy), (x, y)))
         return min(candidates)[1] if candidates else None
@@ -259,8 +293,8 @@ class NavigationController:
 
     def _frontier_candidates(self, start: tuple[int, int], blocked: np.ndarray) -> list[tuple[int, int]]:
         candidates = []
-        for gy in range(1, self.grid.size - 1):
-            for gx in range(1, self.grid.size - 1):
+        for gy in range(1, self.grid.height - 1):
+            for gx in range(1, self.grid.width - 1):
                 cell = (gx, gy)
                 if not self.grid.traversable(cell, blocked):
                     continue
@@ -325,7 +359,7 @@ class NavigationController:
             return False
         blocked = self.grid.inflated_obstacles(self.safety_margin_m)
         return any(blocked[gy, gx] for gx, gy in self.path
-                   if 0 <= gx < self.grid.size and 0 <= gy < self.grid.size)
+                   if 0 <= gx < self.grid.width and 0 <= gy < self.grid.height)
 
     def command(self, pose: Sequence[float]) -> tuple[float, float]:
         if self.mode == "idle":

@@ -225,8 +225,12 @@ export const ThreeDRenderer = (() => {
     clearPoints();
     const points=[];
     const stride=Math.max(1,Math.ceil((map.occupiedCount || 0)/MAX_POINTS));let occupied=0;
-    for(let y=0;y<map.size;y++) for(let x=0;x<map.size;x++) {
-      if(map.grid[y*map.size+x] === 100 && occupied++%stride===0) points.push([(x+.5)*map.resolution-map.radius,(y+.5)*map.resolution-map.radius,0]);
+    const width=map.width??map.size,height=map.height??map.size;
+    for(let y=0;y<height;y++) for(let x=0;x<width;x++) {
+      if(map.grid[y*width+x] === 100 && occupied++%stride===0) {
+        const center=map.cellCenterWorld?.(x,y)??{x:(x+.5)*map.resolution-map.radius,y:(y+.5)*map.resolution-map.radius};
+        points.push([center.x,center.y,0]);
+      }
     }
     addPoints(points);
   }

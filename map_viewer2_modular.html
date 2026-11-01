@@ -50,7 +50,7 @@ button:disabled{opacity:.45;cursor:default}.feature-fields label{display:block;f
 <div id="app">
 <header>
   <div class="brand"><div class="logo">F</div><div><b>Fabtino Mapper</b><div class="sub">Carte LiDAR • Navigation • Vue 3D</div></div></div>
-  <div class="status"><span id="dot"></span><span id="status">Disconnected</span><span class="badge" id="scanBadge">SCAN OFF</span></div>
+  <div class="status"><span id="dot"></span><span id="status">Disconnected</span><span id="bridgeStatus" class="badge">BRIDGE UNKNOWN</span><span id="telemetryStatus" class="badge">TELEMETRY WAITING</span><span class="badge" id="scanBadge">SCAN OFF</span></div>
 </header>
 
 <aside>
@@ -90,11 +90,12 @@ button:disabled{opacity:.45;cursor:default}.feature-fields label{display:block;f
 
 <section>
 <h3>Map Settings</h3>
-<div class="small">Resolution: <b id="resVal">0.05 m</b></div>
-<input id="resolution" type="range" min=".02" max=".15" step=".01" value=".05">
-<div class="small">Radius: <b id="radiusVal">20 m</b></div>
-<input id="radius" type="range" min="5" max="40" step="1" value="20">
-<div class="small">Static obstacles require more than 3 seconds at the same position. Current returns remain visible in cyan and immediately affect navigation.</div>
+<div class="small">Resolution: <b id="resVal">0.10 m</b></div>
+<input id="resolution" type="range" min=".02" max=".15" step=".01" value=".10">
+<div class="small">Map radius: <b id="radiusVal">40 m</b></div>
+<input id="radius" type="range" min="5" max="75" step="1" value="40">
+<div class="small">This is the saved map area, independent of LiDAR range. Increasing radius preserves the current map; the maximum depends on resolution and the 1,000,000-cell limit.</div>
+<div class="small">Obstacles observed stationary for more than 3 seconds are retained in the static map until Clear Map. Current LiDAR returns remain visible in cyan and immediately affect navigation.</div>
 </section>
 
 <section>

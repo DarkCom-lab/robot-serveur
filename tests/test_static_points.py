@@ -24,6 +24,15 @@ def test_anchor_never_follows_a_slow_moving_point_inside_one_cell():
     assert filter.candidates[(0,0)].first_ns>=5_000_000_000
 
 
+def test_stationary_point_with_subcell_scan_jitter_promotes_after_three_seconds():
+    filter=StaticPointFilter(.1)
+    accepted=set()
+    for tenth in range(33):
+        x=.03 if tenth%2 else -.03
+        accepted=filter.observe({(0,0):[(x,0.)]},tenth*100_000_000)
+    assert accepted=={(0,0)}
+
+
 def test_missing_observation_restarts_and_stale_scans_never_accumulate_time():
     filter=StaticPointFilter(.1)
     for tenth in range(21):filter.observe({(0,0):[(0.,0.)]},tenth*100_000_000)

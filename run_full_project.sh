@@ -16,7 +16,7 @@ if [[ ! -f /opt/ros/humble/setup.bash ]]; then
 fi
 
 source /opt/ros/humble/setup.bash
-source "$PROJECT_ROOT/ros_ws/install/setup.bash"
+source "$PROJECT_ROOT/ros_ws/install-linux/setup.bash"
 set -u
 
 for command_name in ros2 webots python3; do

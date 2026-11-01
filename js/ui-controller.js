@@ -20,10 +20,23 @@ export const UIController = (() => {
   }
 
   function setStatus(connected, text) {
-    $("dot").classList.toggle("on", connected);
     $("status").textContent = text;
-    if (!connected) $("driveStatus").textContent = "Robot déconnecté : commandes indisponibles.";
-    else $("driveStatus").textContent = "Prêt : maintenez une direction pour déplacer le robot.";
+    if (!connected) $("driveStatus").textContent = "WebSocket déconnecté : commandes indisponibles.";
+  }
+
+  function setBridge(healthy) {
+    const element=$("bridgeStatus");
+    element.textContent=healthy?"BRIDGE LIVE":"BRIDGE LOST";
+    element.style.color=healthy?"var(--green)":"var(--red)";
+  }
+
+  function setTelemetry(state, fresh) {
+    const element=$("telemetryStatus");
+    element.textContent=`TELEMETRY ${state.toUpperCase()}`;
+    element.style.color=fresh?"var(--green)":"var(--yellow)";
+    $("dot").classList.toggle("on",fresh);
+    if(fresh) $("driveStatus").textContent="Telemetry fresh: commands available.";
+    else if($("status").textContent==="Connected") $("driveStatus").textContent=`Robot telemetry ${state}; motion commands are blocked.`;
   }
 
   function updateDrive(held, sent, reason = "") {
@@ -237,6 +250,8 @@ export const UIController = (() => {
     $,
     log,
     setStatus,
+    setBridge,
+    setTelemetry,
     updateDrive,
     updateSafety,
     updateBattery,

@@ -30,6 +30,21 @@ def planar_ranges(lidar):
     offset = (layers//2)*resolution
     return ranges[offset:offset+resolution]
 
+
+def planar_mask(lidar):
+    """Return the static mask for the same selected horizontal scan layer."""
+    resolution = int(lidar.get('resolution', len(lidar.get('ranges', []))))
+    if resolution < 1:
+        return []
+    raw = lidar.get('masked_indices', [])
+    if not isinstance(raw, list) or any(
+        isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < resolution
+        for index in raw
+    ):
+        raise ValueError('LiDAR masked_indices must be valid horizontal beam indices')
+    masked = set(raw)
+    return [index in masked for index in range(resolution)]
+
 class WebotsBridgeNode(Node):
     def __init__(self):
         super().__init__('webots_bridge')
@@ -124,12 +139,16 @@ class WebotsBridgeNode(Node):
                     if commands:
                         s.sendall(''.join(json.dumps(command,separators=(',',':'))+'\n' for command in commands).encode())
             except Exception as exc:
-                self.connected=False; self.stop_event.wait(0.5)
+                self.connected=False
             finally:
                 try:
                     if self.sock:self.sock.close()
                 except Exception:pass
                 self.sock=None; self.connected=False
+                # Give the disconnected state time to be published before
+                # retrying. This uses the same bounded retry interval that
+                # connection errors previously received.
+                self.stop_event.wait(0.5)
     def process_rx(self):
         while True:
             try:p=self.rx.get_nowait()
@@ -169,7 +188,13 @@ class WebotsBridgeNode(Node):
                 self.last_scan_sim_time = sim_time
                 scan=LaserScan(); scan.header.stamp=stamp; scan.header.frame_id='lidar_link'; scan.angle_min=-float(li.get('fov',6.283185307179586))/2; scan.angle_max=float(li.get('fov',6.283185307179586))/2
                 scan.angle_increment=(scan.angle_max-scan.angle_min)/max(1,len(ranges)-1)
-                scan.range_min=float(li.get('min_range',0.2)); scan.range_max=float(li.get('max_range',12.0)); scan.ranges=[float(x) for x in ranges]; self.pub_scan.publish(scan)
+                scan.range_min=float(li.get('min_range',0.2)); scan.range_max=float(li.get('max_range',12.0)); scan.ranges=[float(x) for x in ranges]
+                # Internal simulation contract: 0 intensity marks an explicitly
+                # masked beam, 1 marks an unmasked beam. This lets mapping tell
+                # masked +inf from a genuine no-return +inf.
+                mask = planar_mask(li)
+                scan.intensities=[0.0 if value else 1.0 for value in mask]
+                self.pub_scan.publish(scan)
             gt=p.get('ground_truth')
             if gt:
                 od=Odometry(); od.header.stamp=stamp; od.header.frame_id='map'; od.child_frame_id='ground_truth/base_link'; od.pose.pose.position.x=float(gt[0]); od.pose.pose.position.y=float(gt[1]); od.pose.pose.position.z=float(gt[2]); q=quaternion_from_euler(0,0,float(gt[3])); od.pose.pose.orientation.x,od.pose.pose.orientation.y,od.pose.pose.orientation.z,od.pose.pose.orientation.w=map(float,q); self.pub_gt.publish(od)

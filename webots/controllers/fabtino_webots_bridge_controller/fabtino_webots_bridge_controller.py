@@ -238,7 +238,8 @@ class Controller:
                 'angular_velocity':[finite(x) for x in gyro],'acceleration':[finite(x) for x in accel]},
                 'lidar':{'enabled':self.scanning,'ranges':ranges,'min_range':finite(self.lidar.getMinRange()),
                           'max_range':finite(self.lidar.getMaxRange()),'fov':finite(self.lidar.getFov()),
-                          'resolution':self.lidar_mask.resolution, 'layers':self.lidar_mask.layers},
+                          'resolution':self.lidar_mask.resolution, 'layers':self.lidar_mask.layers,
+                          'masked_indices':sorted(self.lidar_mask.masked_indices)},
                 'ground_truth':gt,'lidar_roll_rad':0.0}
 
     def send_sensor(self, reset=False):

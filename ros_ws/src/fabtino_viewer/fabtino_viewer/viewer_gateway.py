@@ -26,7 +26,9 @@ class ViewerGateway(Node):
 
     def __init__(self):
         super().__init__('viewer_gateway')
-        self.declare_parameter('host', '0.0.0.0')
+        # Keep the unauthenticated development gateway local until an
+        # authenticated, origin-checked remote-access policy is implemented.
+        self.declare_parameter('host', '127.0.0.1')
         self.declare_parameter('port', 8765)
         self.declare_parameter('map_period_s', 0.5)
         self.declare_parameter('start_server',True)
@@ -297,6 +299,19 @@ class ViewerGateway(Node):
             'scan_matching':self.latest.get('scan_matching',{}),
             'navigation_config':self.latest.get('navigation_config'),
         }
+        def source_stamp(message):
+            header=getattr(message,'header',None)
+            stamp=getattr(header,'stamp',None)
+            if stamp is None:return None
+            return str(int(stamp.sec)*1_000_000_000+int(stamp.nanosec))
+        bridge_status=self.latest.get('bridge',{})
+        mapping_status=self.latest.get('mapping',{})
+        packet['source_stamps_ns'] = {
+            'pose': source_stamp(odom),
+            'scan': source_stamp(scan),
+            'bridge': str(bridge_status.get('sensor_stamp_ns') or '') or None,
+            'map': str(mapping_status.get('latest_scan_stamp_ns') or '') or None,
+        }
         if odom is not None:
             packet['robot']=dict(x=odom.pose.pose.position.x,y=odom.pose.pose.position.y,theta=yaw)
 
@@ -344,9 +359,21 @@ class ViewerGateway(Node):
             raw = np.asarray(occupancy_map.data, dtype=np.int8).tobytes()
             packet['map'] = {
                 'resolution': occupancy_map.info.resolution,
-                'radius': -occupancy_map.info.origin.position.x,
                 'width': occupancy_map.info.width,
                 'height': occupancy_map.info.height,
+                'origin_x': occupancy_map.info.origin.position.x,
+                'origin_y': occupancy_map.info.origin.position.y,
+                'origin_yaw': euler_from_quaternion([
+                    occupancy_map.info.origin.orientation.x,
+                    occupancy_map.info.origin.orientation.y,
+                    occupancy_map.info.origin.orientation.z,
+                    occupancy_map.info.origin.orientation.w,
+                ])[2],
+                'frame_id': occupancy_map.header.frame_id,
+                'revision': self.latest.get('mapping',{}).get('revision'),
+                # Legacy clients can still use a centered-scale fallback;
+                # geometry-aware clients use width/height and the full origin.
+                'radius': max(occupancy_map.info.width,occupancy_map.info.height)*occupancy_map.info.resolution/2,
                 'data_b64': base64.b64encode(raw).decode(),
                 'map_id':self.latest.get('mapping',{}).get('map_id','startup'),
             }
@@ -362,7 +389,9 @@ class ViewerGateway(Node):
         live=getattr(self,'latest_live_cloud',None)
         if live is not None:
             stamp=live.header.stamp.sec*1_000_000_000+live.header.stamp.nanosec
-            if stamp>=getattr(self,'minimum_map_stamp_ns',0) and 0<=self.get_clock().now().nanoseconds-stamp<500_000_000:
+            # Keep the current scan visible through normal Webots/ROS callback
+            # jitter; expire it on the same deadline as viewer telemetry.
+            if stamp>=getattr(self,'minimum_map_stamp_ns',0) and 0<=self.get_clock().now().nanoseconds-stamp<1_500_000_000:
                 packet['live_points']=self._cloud_points(live)
 
         return packet

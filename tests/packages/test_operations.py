@@ -40,6 +40,15 @@ def test_core_rejects_malformed_import_without_mutating_any_map():
     assert grid.data.tolist()==[[-1,0],[100,0]]
 
 
+def test_imported_rectangular_rotated_map_keeps_dimensions_and_origin():
+    payload={'resolution':.5,'radius':1.25,'width':5,'height':3,'origin_x':4.,'origin_y':-2.,
+             'origin_yaw':math.pi/2,'grid':[0]*15}
+    grid=imported_grid(payload)
+    assert grid.data.shape==(3,5)
+    assert grid.cell(*grid.point((4,2)))==(4,2)
+    assert grid.cell(4.,-2.)==(0,0)
+
+
 def test_viewer_drive_reenables_lidar_and_preserves_both_turn_signs(stack):
     bus,nodes=stack
     viewer=nodes['viewer']
@@ -168,6 +177,29 @@ def test_configure_map_changes_ros_grid_and_completes(stack):
     bus.flush()
     assert nodes['mapping'].grid.size==20
     assert nodes['viewer'].latest['operation']['state']=='complete'
+
+
+def test_expanding_live_map_preserves_existing_occupied_and_free_cells(stack):
+    bus,nodes=stack
+    mapping=nodes['mapping'];viewer=nodes['viewer']
+    obstacle=mapping.grid.cell(1.25,-.45)
+    free=mapping.grid.cell(-1.15,.75)
+    mapping.grid.set_cell(obstacle,100)
+    mapping.grid.static_data[obstacle[1],obstacle[0]]=100
+    mapping.grid.set_cell(free,0)
+    obstacle_world=mapping.grid.point(obstacle)
+    free_world=mapping.grid.point(free)
+
+    viewer.cmd('configure_map',{'resolution':.1,'radius':4.,'request_id':'expand-live-map'})
+    bus.flush()
+
+    new_obstacle=mapping.grid.cell(*obstacle_world)
+    new_free=mapping.grid.cell(*free_world)
+    assert mapping.grid.radius==4.
+    assert new_obstacle is not None and mapping.grid.data[new_obstacle[1],new_obstacle[0]]==100
+    assert mapping.grid.static_data[new_obstacle[1],new_obstacle[0]]==100
+    assert new_free is not None and mapping.grid.data[new_free[1],new_free[0]]==0
+    assert viewer.latest['operation']['state']=='complete'
 
 
 def test_operation_timeout_cancels_workers_and_allows_new_drive(stack):

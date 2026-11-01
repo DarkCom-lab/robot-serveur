@@ -67,7 +67,7 @@ def main():
             result.update({key:sum(int(suite.get(key,0)) for suite in xml.findall('testsuite'))
                            for key in ('tests','failures','errors','skipped')})
         results.append(result)
-    js=['tests/test_navigation_ui.cjs','tests/test_map_orientation.cjs','tests/test_map_bundle.cjs']
+    js=['tests/test_navigation_ui.cjs','tests/test_map_orientation.cjs','tests/test_map_bundle.cjs','tests/test_map_geometry.cjs']
     commands=[['node','--test',*js]] if args.package in ('all','fabtino_viewer') else []
     if args.browser:commands+=[['node',file] for file in ('tests/controls_browser.cjs','tests/navigation_browser.cjs','tests/pipeline_browser.cjs','tests/features_browser.cjs')]
     for command in commands:

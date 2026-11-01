@@ -1,5 +1,5 @@
 """Continuous world-frame evidence before a LiDAR return becomes static."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 
 
@@ -9,6 +9,8 @@ class Candidate:
     y: float
     first_ns: int
     last_ns: int
+    samples: list = field(default_factory=list)
+    confirmed: bool = False
 
 
 class StaticPointFilter:
@@ -20,6 +22,8 @@ class StaticPointFilter:
         self.max_gap_ns=round(max_gap_s*1e9)
         self.tolerance=min(.02,self.resolution*.25) if tolerance_m is None else float(tolerance_m)
         if not math.isfinite(self.tolerance) or self.tolerance<=0:raise ValueError('Static position tolerance must be finite and positive')
+        self.jitter_limit=max(self.tolerance*2,self.resolution*.75)
+        self.stationary_speed_limit=self.tolerance/(self.persistence_ns*1e-9)
         self.candidates={}
         self.last_ns=None
 
@@ -28,6 +32,19 @@ class StaticPointFilter:
 
     def forget(self,cells):
         for cell in cells:self.candidates.pop(cell,None)
+
+    @staticmethod
+    def _speed(candidate):
+        if len(candidate.samples)<3:return 0.
+        times=[(sample[0]-candidate.samples[0][0])*1e-9 for sample in candidate.samples]
+        mean_t=sum(times)/len(times)
+        mean_x=sum(sample[1] for sample in candidate.samples)/len(candidate.samples)
+        mean_y=sum(sample[2] for sample in candidate.samples)/len(candidate.samples)
+        denominator=sum((t-mean_t)**2 for t in times)
+        if denominator<=0:return 0.
+        vx=sum((t-mean_t)*(sample[1]-mean_x) for t,sample in zip(times,candidate.samples))/denominator
+        vy=sum((t-mean_t)*(sample[2]-mean_y) for t,sample in zip(times,candidate.samples))/denominator
+        return math.hypot(vx,vy)
 
     def observe(self,cell_points,timestamp_ns):
         """Return cells continuously observed at a fixed anchor for >3 seconds.
@@ -46,8 +63,20 @@ class StaticPointFilter:
             x=sum(point[0] for point in points)/len(points)
             y=sum(point[1] for point in points)/len(points)
             candidate=self.candidates.get(cell)
-            if candidate is None or math.hypot(x-candidate.x,y-candidate.y)>self.tolerance:
-                candidate=Candidate(x,y,now,now);self.candidates[cell]=candidate
-            else:candidate.last_ns=now
-            if now-candidate.first_ns>self.persistence_ns:accepted.add(cell)
+            if candidate is None or math.hypot(x-candidate.x,y-candidate.y)>self.jitter_limit:
+                candidate=Candidate(x,y,now,now,[(now,x,y)]);self.candidates[cell]=candidate
+            elif candidate.confirmed:
+                candidate.last_ns=now
+                accepted.add(cell)
+            else:
+                candidate.last_ns=now
+                candidate.samples.append((now,x,y))
+            if now-candidate.first_ns>self.persistence_ns:
+                if self._speed(candidate)<=self.stationary_speed_limit:
+                    candidate.confirmed=True
+                    accepted.add(cell)
+                else:
+                    # Do not allow a slowly drifting object to become static
+                    # merely because every individual step is below tolerance.
+                    self.candidates[cell]=Candidate(x,y,now,now,[(now,x,y)])
         return accepted

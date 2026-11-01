@@ -5,8 +5,8 @@
     {
       "suite": "fabtino_mapping",
       "result": "passed",
-      "elapsed_s": 1.577,
-      "tests": 10,
+      "elapsed_s": 1.381,
+      "tests": 15,
       "failures": 0,
       "errors": 0,
       "skipped": 0
